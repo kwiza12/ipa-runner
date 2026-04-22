@@ -1,0 +1,53 @@
+name: Interview Session
+
+on:
+  workflow_dispatch:
+    inputs:
+      session_id:
+        description: 'IPA session ID'
+        required: true
+        type: string
+      callback_url:
+        description: 'IPA backend callback base URL'
+        required: true
+        type: string
+      callback_token:
+        description: 'One-time callback authentication token'
+        required: true
+        type: string
+      timeout_minutes:
+        description: 'Session timeout in minutes (max 60)'
+        required: false
+        default: '55'
+        type: string
+
+jobs:
+  interview:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout runner repo
+        uses: actions/checkout@v4
+
+      - name: Run interview session
+        env:
+          SESSION_ID: ${{ inputs.session_id }}
+          CALLBACK_URL: ${{ inputs.callback_url }}
+          CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          TIMEOUT_MINUTES: ${{ inputs.timeout_minutes }}
+        run: |
+          chmod +x runner-agent.sh
+          bash runner-agent.sh
+
+      - name: Upload session artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: session-${{ inputs.session_id }}
+          path: |
+            /home/candidate/session-recording.cast
+            /home/candidate/.bash_history
+            /home/candidate/challenge/
+          if-no-files-found: ignore
+          retention-days: 30
