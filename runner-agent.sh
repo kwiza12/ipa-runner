@@ -69,6 +69,56 @@ curl -sLS https://get.arkade.dev | sudo sh > /dev/null 2>&1 || true
 
 log "Base tools installed."
 
+# --- 2b. K8s cluster state tracking ---
+K8S_INSTALLED=false
+
+install_k3s() {
+    if [ "${K8S_INSTALLED}" = "true" ]; then
+        log "k3s already installed, skipping."
+        return 0
+    fi
+
+    log "Installing k3s (lightweight Kubernetes)..."
+    curl -sfL https://get.k3s.io | INSTALL_K3S_EXEC="--disable=traefik --write-kubeconfig-mode=644" sh - 2>&1 || {
+        log "ERROR: k3s installation failed"
+        return 1
+    }
+
+    # Wait for k3s to be ready
+    log "Waiting for k3s to be ready..."
+    local retries=0
+    while [ $retries -lt 60 ]; do
+        if sudo k3s kubectl get nodes 2>/dev/null | grep -q " Ready"; then
+            break
+        fi
+        retries=$((retries + 1))
+        sleep 2
+    done
+
+    if [ $retries -ge 60 ]; then
+        log "ERROR: k3s did not become ready in time"
+        return 1
+    fi
+
+    log "k3s is ready."
+
+    # Set up kubeconfig for candidate user
+    sudo mkdir -p "${CANDIDATE_HOME}/.kube"
+    sudo cp /etc/rancher/k3s/k3s.yaml "${CANDIDATE_HOME}/.kube/config"
+    sudo chown -R "${CANDIDATE_USER}:${CANDIDATE_USER}" "${CANDIDATE_HOME}/.kube"
+
+    # Add KUBECONFIG to candidate's bashrc
+    if ! grep -q "KUBECONFIG" "${CANDIDATE_HOME}/.bashrc" 2>/dev/null; then
+        echo 'export KUBECONFIG="$HOME/.kube/config"' | sudo tee -a "${CANDIDATE_HOME}/.bashrc" > /dev/null
+    fi
+
+    # Make kubectl available to candidate
+    sudo ln -sf /usr/local/bin/k3s /usr/local/bin/kubectl 2>/dev/null || true
+
+    K8S_INSTALLED=true
+    log "k3s configured for candidate user."
+}
+
 # --- 3. Start ttyd (web terminal) ---
 log "Starting ttyd web terminal..."
 TTYD_PORT=7681
@@ -138,6 +188,24 @@ apply_scenario() {
     namespace=$(echo "${cmd_json}" | jq -r '.namespace // ""')
 
     log "Applying scenario: ${scenario_name} (${cmd_id})"
+
+    # Check if this scenario needs Kubernetes
+    local needs_k8s=$(echo "${cmd_json}" | jq -r '.needs_k8s // false')
+    if [ "${needs_k8s}" = "true" ]; then
+        install_k3s || {
+            api_post "/${SESSION_ID}/command-result" "{\"id\":\"${cmd_id}\",\"status\":\"failed\",\"error\":\"k3s_install_failed\"}"
+            return 1
+        }
+
+        # Create namespace if specified
+        if [ -n "${namespace}" ] && [ "${namespace}" != "null" ]; then
+            log "Creating namespace: ${namespace}"
+            sudo k3s kubectl create namespace "${namespace}" 2>/dev/null || true
+            # Set as default namespace for candidate
+            sudo -u "${CANDIDATE_USER}" env HOME="${CANDIDATE_HOME}" \
+                kubectl config set-context --current --namespace="${namespace}" 2>/dev/null || true
+        fi
+    fi
 
     # Install apt packages
     if [ -n "${packages}" ]; then
