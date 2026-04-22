@@ -73,8 +73,9 @@ log "Base tools installed."
 log "Starting ttyd web terminal..."
 TTYD_PORT=7681
 
-# Start asciinema recording in background (as candidate user with proper home)
-sudo -u "${CANDIDATE_USER}" -H bash -c "asciinema rec ${CANDIDATE_HOME}/session-recording.cast --overwrite -c 'sleep infinity'" &
+# Start asciinema recording in background (as candidate user with explicit HOME)
+sudo -u "${CANDIDATE_USER}" env HOME="${CANDIDATE_HOME}" \
+    asciinema rec "${CANDIDATE_HOME}/session-recording.cast" --overwrite -c "sleep infinity" &
 ASCIINEMA_PID=$!
 
 # Start ttyd with bash wrapper to avoid segfault
