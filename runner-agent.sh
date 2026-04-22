@@ -119,12 +119,12 @@ TTYD_PORT=7681
 asciinema rec "${WORK_HOME}/session-recording.cast" --overwrite -c "sleep infinity" &
 ASCIINEMA_PID=$!
 
-# Start ttyd — runs bash directly as the runner user
+# Start ttyd — runs bash directly as the runner user, starting in home dir
 ttyd --port ${TTYD_PORT} --writable \
     -t fontSize=17 \
     -t reconnect=3 \
     -t 'theme={"background":"#000000","foreground":"#c7c7c7","cursor":"#00ff00"}' \
-    bash &
+    bash -c "cd ${WORK_HOME} && exec bash --login" &
 TTYD_PID=$!
 
 sleep 2
