@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # runner-agent.sh — Runs inside GitHub Actions to provide an interview environment.
-# Installs ttyd + cloudflared, creates a candidate user, polls IPA backend for
-# scenario commands, and reports status back.
+# Uses the runner account directly (each GH Actions run is an ephemeral VM).
+# Installs ttyd + cloudflared, polls IPA backend for scenario commands.
 set -euo pipefail
 
 # --- Configuration from environment ---
@@ -10,8 +10,7 @@ CALLBACK_URL="${CALLBACK_URL:?CALLBACK_URL is required}"
 CALLBACK_TOKEN="${CALLBACK_TOKEN:?CALLBACK_TOKEN is required}"
 TIMEOUT_MINUTES="${TIMEOUT_MINUTES:-55}"
 
-CANDIDATE_USER="candidate"
-CANDIDATE_HOME="/home/${CANDIDATE_USER}"
+WORK_HOME="${HOME}"
 POLL_INTERVAL=5
 HEARTBEAT_INTERVAL=30
 
@@ -34,14 +33,10 @@ api_get() {
         "${CALLBACK_URL}${endpoint}" 2>/dev/null || echo "[]"
 }
 
-# --- 1. Create candidate user ---
-log "Creating candidate user..."
-sudo useradd -m -s /bin/bash "${CANDIDATE_USER}" 2>/dev/null || true
-sudo mkdir -p "${CANDIDATE_HOME}/.local/bin"
-sudo chown -R "${CANDIDATE_USER}:${CANDIDATE_USER}" "${CANDIDATE_HOME}"
-
-# Add candidate's local bin to PATH
-echo 'export PATH="$HOME/.local/bin:$PATH"' | sudo tee -a "${CANDIDATE_HOME}/.bashrc" > /dev/null
+# --- 1. Prepare workspace ---
+log "Preparing workspace..."
+mkdir -p "${WORK_HOME}/.local/bin" "${WORK_HOME}/.config" "${WORK_HOME}/challenge"
+export PATH="${WORK_HOME}/.local/bin:${WORK_HOME}/.arkade/bin:/usr/local/bin:$PATH"
 
 # --- 2. Install base tools ---
 log "Installing base tools (ttyd, cloudflared, asciinema)..."
@@ -57,12 +52,8 @@ sudo wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download
     -O /usr/local/bin/cloudflared
 sudo chmod +x /usr/local/bin/cloudflared
 
-# asciinema
+# asciinema + jq
 sudo apt-get update -qq && sudo apt-get install -y -qq asciinema jq > /dev/null 2>&1 || true
-
-# Create asciinema config dir for candidate user (prevents permission error)
-sudo mkdir -p "${CANDIDATE_HOME}/.config/asciinema"
-sudo chown -R "${CANDIDATE_USER}:${CANDIDATE_USER}" "${CANDIDATE_HOME}/.config"
 
 # arkade (for installing CLI tools like kubectl, terraform, helm, etc.)
 curl -sLS https://get.arkade.dev | sudo sh > /dev/null 2>&1 || true
@@ -102,38 +93,38 @@ install_k3s() {
 
     log "k3s is ready."
 
-    # Set up kubeconfig for candidate user
-    sudo mkdir -p "${CANDIDATE_HOME}/.kube"
-    sudo cp /etc/rancher/k3s/k3s.yaml "${CANDIDATE_HOME}/.kube/config"
-    sudo chown -R "${CANDIDATE_USER}:${CANDIDATE_USER}" "${CANDIDATE_HOME}/.kube"
+    # Set up kubeconfig
+    mkdir -p "${WORK_HOME}/.kube"
+    sudo cp /etc/rancher/k3s/k3s.yaml "${WORK_HOME}/.kube/config"
+    sudo chown "$(id -u):$(id -g)" "${WORK_HOME}/.kube/config"
+    export KUBECONFIG="${WORK_HOME}/.kube/config"
 
-    # Add KUBECONFIG to candidate's bashrc
-    if ! grep -q "KUBECONFIG" "${CANDIDATE_HOME}/.bashrc" 2>/dev/null; then
-        echo 'export KUBECONFIG="$HOME/.kube/config"' | sudo tee -a "${CANDIDATE_HOME}/.bashrc" > /dev/null
+    # Add KUBECONFIG to bashrc
+    if ! grep -q "KUBECONFIG" "${WORK_HOME}/.bashrc" 2>/dev/null; then
+        echo "export KUBECONFIG=\"${WORK_HOME}/.kube/config\"" >> "${WORK_HOME}/.bashrc"
     fi
 
-    # Make kubectl available to candidate
+    # Make kubectl available
     sudo ln -sf /usr/local/bin/k3s /usr/local/bin/kubectl 2>/dev/null || true
 
     K8S_INSTALLED=true
-    log "k3s configured for candidate user."
+    log "k3s configured."
 }
 
 # --- 3. Start ttyd (web terminal) ---
 log "Starting ttyd web terminal..."
 TTYD_PORT=7681
 
-# Start asciinema recording in background (as candidate user with explicit HOME)
-sudo -u "${CANDIDATE_USER}" env HOME="${CANDIDATE_HOME}" \
-    asciinema rec "${CANDIDATE_HOME}/session-recording.cast" --overwrite -c "sleep infinity" &
+# Start asciinema recording in background
+asciinema rec "${WORK_HOME}/session-recording.cast" --overwrite -c "sleep infinity" &
 ASCIINEMA_PID=$!
 
-# Start ttyd with bash wrapper to avoid segfault
+# Start ttyd — runs bash directly as the runner user
 ttyd --port ${TTYD_PORT} --writable \
     -t fontSize=17 \
     -t reconnect=3 \
     -t 'theme={"background":"#000000","foreground":"#c7c7c7","cursor":"#00ff00"}' \
-    bash -c "sudo -u ${CANDIDATE_USER} -i" &
+    bash &
 TTYD_PID=$!
 
 sleep 2
@@ -200,10 +191,8 @@ apply_scenario() {
         # Create namespace if specified
         if [ -n "${namespace}" ] && [ "${namespace}" != "null" ]; then
             log "Creating namespace: ${namespace}"
-            sudo k3s kubectl create namespace "${namespace}" 2>/dev/null || true
-            # Set as default namespace for candidate
-            sudo -u "${CANDIDATE_USER}" env HOME="${CANDIDATE_HOME}" \
-                kubectl config set-context --current --namespace="${namespace}" 2>/dev/null || true
+            kubectl create namespace "${namespace}" 2>/dev/null || true
+            kubectl config set-context --current --namespace="${namespace}" 2>/dev/null || true
         fi
     fi
 
@@ -234,34 +223,30 @@ apply_scenario() {
         "${CALLBACK_URL}/${SESSION_ID}/scenario/${scenario_name}/bundle" 2>/dev/null || true
 
     if [ -f "${bundle_path}" ] && [ -s "${bundle_path}" ]; then
-        sudo mkdir -p "${CANDIDATE_HOME}/challenge"
-        sudo tar -xzf "${bundle_path}" -C "${CANDIDATE_HOME}/challenge/" 2>/dev/null || true
-        sudo chown -R "${CANDIDATE_USER}:${CANDIDATE_USER}" "${CANDIDATE_HOME}/challenge/"
+        mkdir -p "${WORK_HOME}/challenge"
+        tar -xzf "${bundle_path}" -C "${WORK_HOME}/challenge/" 2>/dev/null || true
         rm -f "${bundle_path}"
         log "Scenario files extracted."
     fi
 
-    # Run setup commands as candidate user
+    # Run setup commands
     if [ -n "${setup}" ]; then
         log "Running setup commands..."
         while IFS= read -r cmd; do
             [ -z "${cmd}" ] && continue
             log "  > ${cmd}"
-            sudo -u "${CANDIDATE_USER}" -i bash -c "${cmd}" 2>&1 || true
+            bash -c "${cmd}" 2>&1 || true
         done <<< "${setup}"
     fi
 
     # Write instructions
     if [ -n "${instructions}" ] && [ "${instructions}" != "null" ] && [ "${instructions}" != "" ]; then
         log "Writing instructions..."
-        echo "${instructions}" | sudo tee "${CANDIDATE_HOME}/INSTRUCTIONS.md" > /dev/null
-        sudo chown "${CANDIDATE_USER}:${CANDIDATE_USER}" "${CANDIDATE_HOME}/INSTRUCTIONS.md"
-        # Also display in terminal via motd-like approach
-        echo "${instructions}" | sudo tee "${CANDIDATE_HOME}/.interview-instructions" > /dev/null
-        sudo chown "${CANDIDATE_USER}:${CANDIDATE_USER}" "${CANDIDATE_HOME}/.interview-instructions"
-        # Add to bashrc to show on login
-        if ! grep -q "interview-instructions" "${CANDIDATE_HOME}/.bashrc" 2>/dev/null; then
-            echo 'cat ~/.interview-instructions 2>/dev/null' | sudo tee -a "${CANDIDATE_HOME}/.bashrc" > /dev/null
+        echo "${instructions}" > "${WORK_HOME}/INSTRUCTIONS.md"
+        echo "${instructions}" > "${WORK_HOME}/.interview-instructions"
+        # Show instructions on terminal login
+        if ! grep -q "interview-instructions" "${WORK_HOME}/.bashrc" 2>/dev/null; then
+            echo 'cat ~/.interview-instructions 2>/dev/null' >> "${WORK_HOME}/.bashrc"
         fi
     fi
 
@@ -316,9 +301,6 @@ log "Session ending. Collecting artifacts..."
 # Stop asciinema recording gracefully
 kill ${ASCIINEMA_PID} 2>/dev/null || true
 sleep 2
-
-# Copy bash history for artifact upload
-sudo cp "${CANDIDATE_HOME}/.bash_history" "${CANDIDATE_HOME}/.bash_history.bak" 2>/dev/null || true
 
 # Notify backend
 api_post "/workflow-complete" '{"status":"completed"}'

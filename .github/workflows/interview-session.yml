@@ -46,8 +46,8 @@ jobs:
         with:
           name: session-${{ inputs.session_id }}
           path: |
-            /home/candidate/session-recording.cast
-            /home/candidate/.bash_history
-            /home/candidate/challenge/
+            ~/session-recording.cast
+            ~/.bash_history
+            ~/challenge/
           if-no-files-found: ignore
           retention-days: 30
