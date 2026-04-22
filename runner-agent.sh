@@ -130,26 +130,61 @@ TTYD_PID=$!
 sleep 2
 log "ttyd running on port ${TTYD_PORT}."
 
-# --- 4. Start cloudflared tunnel ---
-log "Starting cloudflared tunnel..."
-TUNNEL_LOG="/tmp/cloudflared.log"
-cloudflared tunnel --url "http://localhost:${TTYD_PORT}" \
-    --no-autoupdate > "${TUNNEL_LOG}" 2>&1 &
-CLOUDFLARED_PID=$!
-
-# Wait for tunnel URL
+# --- 4. Start cloudflared tunnel (with retry) ---
+MAX_TUNNEL_ATTEMPTS=3
 TUNNEL_URL=""
-for i in $(seq 1 60); do
-    TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "${TUNNEL_LOG}" 2>/dev/null | head -1 || true)
-    if [ -n "${TUNNEL_URL}" ]; then
-        break
+CLOUDFLARED_PID=""
+
+for attempt in $(seq 1 ${MAX_TUNNEL_ATTEMPTS}); do
+    log "Starting cloudflared tunnel (attempt ${attempt}/${MAX_TUNNEL_ATTEMPTS})..."
+    TUNNEL_LOG="/tmp/cloudflared-${attempt}.log"
+
+    cloudflared tunnel --url "http://localhost:${TTYD_PORT}" \
+        --no-autoupdate > "${TUNNEL_LOG}" 2>&1 &
+    CLOUDFLARED_PID=$!
+
+    # Wait for tunnel URL to appear in logs
+    TUNNEL_URL=""
+    for i in $(seq 1 45); do
+        TUNNEL_URL=$(grep -oP 'https://[a-zA-Z0-9-]+\.trycloudflare\.com' "${TUNNEL_LOG}" 2>/dev/null | head -1 || true)
+        if [ -n "${TUNNEL_URL}" ]; then
+            break
+        fi
+        sleep 1
+    done
+
+    if [ -z "${TUNNEL_URL}" ]; then
+        log "Attempt ${attempt}: No tunnel URL found, retrying..."
+        kill ${CLOUDFLARED_PID} 2>/dev/null || true
+        wait ${CLOUDFLARED_PID} 2>/dev/null || true
+        continue
     fi
-    sleep 1
+
+    # Verify tunnel is actually reachable
+    log "Verifying tunnel: ${TUNNEL_URL}"
+    REACHABLE=false
+    for v in $(seq 1 15); do
+        if curl -sf --max-time 5 -o /dev/null "${TUNNEL_URL}" 2>/dev/null; then
+            REACHABLE=true
+            break
+        fi
+        sleep 2
+    done
+
+    if [ "${REACHABLE}" = "true" ]; then
+        log "Tunnel verified and reachable: ${TUNNEL_URL}"
+        break
+    else
+        log "Attempt ${attempt}: Tunnel URL not reachable, restarting cloudflared..."
+        kill ${CLOUDFLARED_PID} 2>/dev/null || true
+        wait ${CLOUDFLARED_PID} 2>/dev/null || true
+        TUNNEL_URL=""
+    fi
 done
 
 if [ -z "${TUNNEL_URL}" ]; then
-    log "ERROR: Failed to get tunnel URL after 60 seconds"
-    api_post "/workflow-complete" '{"status":"failed","error":"tunnel_timeout"}'
+    log "ERROR: Failed to establish reachable tunnel after ${MAX_TUNNEL_ATTEMPTS} attempts"
+    api_post "/workflow-complete" '{"status":"failed","error":"tunnel_unreachable"}'
     exit 1
 fi
 
