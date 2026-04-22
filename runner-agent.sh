@@ -58,7 +58,11 @@ sudo wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download
 sudo chmod +x /usr/local/bin/cloudflared
 
 # asciinema
-sudo apt-get update -qq && sudo apt-get install -y -qq asciinema > /dev/null 2>&1 || true
+sudo apt-get update -qq && sudo apt-get install -y -qq asciinema jq > /dev/null 2>&1 || true
+
+# Create asciinema config dir for candidate user (prevents permission error)
+sudo mkdir -p "${CANDIDATE_HOME}/.config/asciinema"
+sudo chown -R "${CANDIDATE_USER}:${CANDIDATE_USER}" "${CANDIDATE_HOME}/.config"
 
 # arkade (for installing CLI tools like kubectl, terraform, helm, etc.)
 curl -sLS https://get.arkade.dev | sudo sh > /dev/null 2>&1 || true
@@ -69,16 +73,16 @@ log "Base tools installed."
 log "Starting ttyd web terminal..."
 TTYD_PORT=7681
 
-sudo -u "${CANDIDATE_USER}" -i -- asciinema rec \
-    "${CANDIDATE_HOME}/session-recording.cast" \
-    --overwrite -c "sleep infinity" &
+# Start asciinema recording in background (as candidate user with proper home)
+sudo -u "${CANDIDATE_USER}" -H bash -c "asciinema rec ${CANDIDATE_HOME}/session-recording.cast --overwrite -c 'sleep infinity'" &
 ASCIINEMA_PID=$!
 
+# Start ttyd with bash wrapper to avoid segfault
 ttyd --port ${TTYD_PORT} --writable \
     -t fontSize=17 \
     -t reconnect=3 \
     -t 'theme={"background":"#000000","foreground":"#c7c7c7","cursor":"#00ff00"}' \
-    sudo -u "${CANDIDATE_USER}" -i &
+    bash -c "sudo -u ${CANDIDATE_USER} -i" &
 TTYD_PID=$!
 
 sleep 2
