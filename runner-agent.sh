@@ -52,8 +52,19 @@ sudo wget -q "https://github.com/cloudflare/cloudflared/releases/latest/download
     -O /usr/local/bin/cloudflared
 sudo chmod +x /usr/local/bin/cloudflared
 
-# asciinema + jq
-sudo apt-get update -qq && sudo apt-get install -y -qq asciinema jq > /dev/null 2>&1 || true
+# asciinema + jq + locale + unicode support
+sudo apt-get update -qq && sudo apt-get install -y -qq asciinema jq locales > /dev/null 2>&1 || true
+
+# Set up UTF-8 locale
+sudo locale-gen en_US.UTF-8 > /dev/null 2>&1 || true
+export LANG=en_US.UTF-8
+export LC_ALL=en_US.UTF-8
+export TERM=xterm-256color
+
+# Add locale to bashrc so ttyd sessions get it
+echo 'export LANG=en_US.UTF-8' >> "${WORK_HOME}/.bashrc"
+echo 'export LC_ALL=en_US.UTF-8' >> "${WORK_HOME}/.bashrc"
+echo 'export TERM=xterm-256color' >> "${WORK_HOME}/.bashrc"
 
 # arkade (for installing CLI tools like kubectl, terraform, helm, etc.)
 curl -sLS https://get.arkade.dev | sudo sh > /dev/null 2>&1 || true
