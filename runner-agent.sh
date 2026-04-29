@@ -20,11 +20,27 @@ log() { echo "[runner-agent] $(date '+%H:%M:%S') $*"; }
 api_post() {
     local endpoint="$1"
     local data="${2:-{}}"
-    curl -sf -X POST \
-        -H "Content-Type: application/json" \
-        -H "X-Callback-Token: ${CALLBACK_TOKEN}" \
-        -d "${data}" \
-        "${CALLBACK_URL}${endpoint}" 2>/dev/null || true
+    local attempt
+    for attempt in $(seq 1 3); do
+        local response
+        response=$(curl -s -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Callback-Token: ${CALLBACK_TOKEN}" \
+            -d "${data}" \
+            --max-time 10 \
+            -w "\n%{http_code}" \
+            "${CALLBACK_URL}${endpoint}" 2>&1)
+        local http_code=$(echo "${response}" | tail -1)
+        local body=$(echo "${response}" | sed '$d')
+        if [ "${http_code}" = "200" ] || [ "${http_code}" = "201" ]; then
+            echo "${body}"
+            return 0
+        fi
+        log "api_post ${endpoint} attempt ${attempt} failed (HTTP ${http_code})"
+        sleep 2
+    done
+    log "api_post ${endpoint} failed after 3 attempts"
+    return 1
 }
 
 api_get() {
