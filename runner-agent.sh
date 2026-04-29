@@ -201,8 +201,29 @@ fi
 
 log "Tunnel ready: ${TUNNEL_URL}"
 
-# --- 5. Report tunnel URL to IPA backend ---
-api_post "/session-ready" "{\"tunnel_url\":\"${TUNNEL_URL}\"}"
+# --- 5. Report tunnel URL to IPA backend (with retry) ---
+REPORTED=false
+for r in $(seq 1 5); do
+    RESPONSE=$(curl -sf -X POST \
+        -H "Content-Type: application/json" \
+        -H "X-Callback-Token: ${CALLBACK_TOKEN}" \
+        -d "{\"tunnel_url\":\"${TUNNEL_URL}\"}" \
+        --max-time 10 \
+        -w "\n%{http_code}" \
+        "${CALLBACK_URL}/session-ready" 2>&1)
+    HTTP_CODE=$(echo "${RESPONSE}" | tail -1)
+    BODY=$(echo "${RESPONSE}" | head -1)
+    log "session-ready attempt ${r}: HTTP ${HTTP_CODE} | ${BODY}"
+    if [ "${HTTP_CODE}" = "200" ]; then
+        REPORTED=true
+        break
+    fi
+    sleep 3
+done
+
+if [ "${REPORTED}" = "false" ]; then
+    log "WARNING: Failed to report tunnel URL after 5 attempts. Continuing anyway..."
+fi
 log "Reported tunnel URL to IPA backend."
 
 # --- 6. Main loop: poll for commands + heartbeat ---
