@@ -289,7 +289,27 @@ apply_scenario() {
     if [ -n "${pre_install}" ]; then
         for tool in ${pre_install}; do
             log "Installing tool: ${tool}"
-            sudo arkade get "${tool}" --quiet 2>/dev/null || true
+            timeout 120 sudo arkade get "${tool}" --quiet 2>/dev/null || {
+                log "WARNING: arkade install of ${tool} failed or timed out, trying direct download..."
+                # Fallback: try direct install for common tools
+                case "${tool}" in
+                    terraform)
+                        wget -qO /tmp/terraform.zip "https://releases.hashicorp.com/terraform/1.7.5/terraform_1.7.5_linux_amd64.zip" 2>/dev/null && \
+                        sudo unzip -o /tmp/terraform.zip -d /usr/local/bin/ > /dev/null 2>&1 && \
+                        rm -f /tmp/terraform.zip || true
+                        ;;
+                    kubectl)
+                        sudo wget -qO /usr/local/bin/kubectl "https://dl.k8s.io/release/v1.29.0/bin/linux/amd64/kubectl" && \
+                        sudo chmod +x /usr/local/bin/kubectl || true
+                        ;;
+                    helm)
+                        curl -sfL https://raw.githubusercontent.com/helm/helm/main/scripts/get-helm-3 | bash > /dev/null 2>&1 || true
+                        ;;
+                    *)
+                        log "No fallback for ${tool}"
+                        ;;
+                esac
+            }
             # Move to a PATH location
             if [ -f "/root/.arkade/bin/${tool}" ]; then
                 sudo cp "/root/.arkade/bin/${tool}" "/usr/local/bin/${tool}"
@@ -318,7 +338,7 @@ apply_scenario() {
         while IFS= read -r cmd; do
             [ -z "${cmd}" ] && continue
             log "  > ${cmd}"
-            bash -c "${cmd}" 2>&1 || true
+            timeout 120 bash -c "${cmd}" 2>&1 || log "WARNING: setup command timed out or failed"
         done <<< "${setup}"
     fi
 
