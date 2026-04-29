@@ -2,7 +2,7 @@
 # runner-agent.sh — Runs inside GitHub Actions to provide an interview environment.
 # Uses the runner account directly (each GH Actions run is an ephemeral VM).
 # Installs ttyd + cloudflared, polls IPA backend for scenario commands.
-set -euo pipefail
+set -uo pipefail
 
 # --- Configuration from environment ---
 SESSION_ID="${SESSION_ID:?SESSION_ID is required}"
